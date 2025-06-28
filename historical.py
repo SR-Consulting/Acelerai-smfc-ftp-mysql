@@ -1,5 +1,5 @@
 """
-Carga de CSVs Diários direto do FTP ("*_Historical*.csv")
+Carga de CSVs Históricas direto do FTP ("*_Historical*.csv")
 ▶ Conecta‑se ao SFTP do Marketing Cloud
 ▶ Faz download temporário dos CSVs que correspondem ao padrão em /Import
 ▶ Insere dados na tabela MySQL sfmc_data_extension_item (criando colunas se necessário)
@@ -21,7 +21,6 @@ from itertools import islice
 from datetime import datetime
 
 import paramiko
-import mysql.connector
 from mysql.connector import pooling, errors
 
 # -------------------------------------------------

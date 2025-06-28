@@ -21,7 +21,6 @@ from itertools import islice
 from datetime import datetime
 
 import paramiko
-import mysql.connector
 from mysql.connector import pooling, errors
 
 # -------------------------------------------------
