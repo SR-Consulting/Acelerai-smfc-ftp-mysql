@@ -1,8 +1,8 @@
 """
-Carga de CSVs Diários direto do FTP ("*_Daily*.csv")
+Carga de CSVs Daily direto do FTP ("*_daily*.csv")
 ▶ Conecta‑se ao SFTP do Marketing Cloud
 ▶ Faz download temporário dos CSVs que correspondem ao padrão em /Import
-▶ Insere dados na tabela MySQL sfmc_data_extension_item (criando colunas se necessário)
+▶ Insere dados na tabela MySQL correspondente ao prefixo do arquivo (sfmc_*)
 
 Autor: Vinícius
 Atualizado: 28/06/2025
@@ -42,7 +42,7 @@ SFTP_PORT = 22
 SFTP_USER = "546005055_3"
 SFTP_PASS = os.getenv("SFTP_PASS", "sr@@consulting123")
 SFTP_DIR = "Import"  # pasta remota onde ficam os CSVs
-PATTERN = "*_Daily*.csv"  # padrão procurado no FTP
+PATTERN = "*_daily*.csv"  # padrão procurado no FTP
 
 # -------------------------------------------------
 # MySQL
@@ -57,7 +57,6 @@ MYSQL_CONFIG = {
     "pool_name": "sfmc_pool",
     "pool_size": 5,
 }
-TABLE_NAME = "sfmc_data_extension_item"
 
 # -------------------------------------------------
 # Diretórios locais
@@ -114,7 +113,7 @@ def download_file(sftp, remote_path: str, local_path: Path):
 
 
 # -------------------------------------------------
-# Funções genéricas (mesmas do script anterior)
+# Funções genéricas
 # -------------------------------------------------
 
 
@@ -127,9 +126,9 @@ def chunked(it, size):
         yield batch
 
 
-def build_insert(cols):
+def build_insert(table, cols):
     ph = ", ".join(["%s"] * len(cols))
-    return f"INSERT INTO {TABLE_NAME} ({', '.join(cols)}) VALUES ({ph})"
+    return f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({ph})"
 
 
 def get_pool():
@@ -150,25 +149,42 @@ def dedup_case_insensitive(seq):
     return unique, pos_map
 
 
-def check_and_create_columns(conn, cols):
+def check_and_create_columns(conn, table, cols):
     cur = conn.cursor()
     try:
-        cur.execute(f"SHOW COLUMNS FROM {TABLE_NAME}")
+        cur.execute(f"SHOW COLUMNS FROM {table}")
         existentes = {row[0].casefold() for row in cur.fetchall()}
         for col in cols:
             if col.casefold() in existentes:
                 continue
             try:
-                cur.execute(f"ALTER TABLE {TABLE_NAME} ADD COLUMN `{col}` VARCHAR(255)")
-                log.info("Coluna %s criada.", col)
+                cur.execute(f"ALTER TABLE {table} ADD COLUMN `{col}` VARCHAR(255)")
+                log.info("Coluna %s criada na tabela %s.", col, table)
             except errors.ProgrammingError as e:
                 if e.errno == 1060:
-                    log.debug("Coluna %s já existe – ignorando.", col)
+                    log.debug(
+                        "Coluna %s já existe na tabela %s – ignorando.", col, table
+                    )
                 else:
                     raise
         conn.commit()
     finally:
         cur.close()
+
+
+def get_table_name_from_filename(filename):
+    """Extrai o nome da tabela do nome do arquivo (prefixo antes de '_daily')"""
+    base_name = Path(filename).stem  # Remove a extensão
+    if "_daily" in base_name:
+        table_part = base_name.split("_daily")[0]
+        # Se já começa com sfmc_, não adiciona novamente
+        if table_part.lower().startswith("sfmc_"):
+            return table_part.lower()
+        return f"sfmc_{table_part.lower()}"
+    # Para arquivos sem _daily no nome
+    if base_name.lower().startswith("sfmc_"):
+        return base_name.lower()
+    return f"sfmc_{base_name.lower()}"
 
 
 # -------------------------------------------------
@@ -177,10 +193,9 @@ def check_and_create_columns(conn, cols):
 
 
 def load_csv(csv_path: Path, pool):
-    customer_key_const = csv_path.stem
-    log.info(
-        "Iniciando carga de %s (CustomerKey=%s)", csv_path.name, customer_key_const
-    )
+    table_name = get_table_name_from_filename(csv_path.name)
+    log.info("Iniciando carga de %s na tabela %s", csv_path.name, table_name)
+
     conn = pool.get_connection()
     cur = None
     try:
@@ -188,14 +203,14 @@ def load_csv(csv_path: Path, pool):
             rdr = csv.reader(f)
             raw_header = next(rdr)
             header, idx_map = dedup_case_insensitive(raw_header)
-            cols = header + ["CustomerKey"]
-            check_and_create_columns(conn, cols)
-            sql = build_insert(cols)
+            cols = header
+            check_and_create_columns(conn, table_name, cols)
+            sql = build_insert(table_name, cols)
             total = pending = 0
             cur = conn.cursor()
             for batch_no, rows in enumerate(chunked(rdr, BATCH_SIZE), start=1):
                 dados = [
-                    tuple([row[i] for i in idx_map] + [customer_key_const])
+                    tuple([row[i] for i in idx_map])
                     for row in rows
                     if len(row) >= len(raw_header)
                 ]
@@ -212,7 +227,7 @@ def load_csv(csv_path: Path, pool):
                     )
                     log.error("Tipo: %s – %s", type(e).__name__, e)
                     log.debug("Traceback:\n%s", traceback.format_exc())
-                    quar_file = QUAR_DIR / f"{customer_key_const}_batch{batch_no}.json"
+                    quar_file = QUAR_DIR / f"{table_name}_batch{batch_no}.json"
                     with quar_file.open("w", encoding="utf-8") as qf:
                         json.dump(
                             {"header": cols, "rows": dados[:50]}, qf, ensure_ascii=False
@@ -266,7 +281,7 @@ def main():
     log.info("Conexão estabelecida.")
 
     try:
-        # 2) Localizar arquivos ‑Daily no FTP
+        # 2) Localizar arquivos -Daily no FTP
         remote_items = [
             it
             for it in sftp.listdir_attr(SFTP_DIR)
